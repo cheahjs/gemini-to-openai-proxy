@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
+	"sync/atomic"
 )
 
 const (
@@ -22,9 +24,11 @@ const (
 )
 
 var (
-	GeminiApiKey = os.Getenv("GEMINI_API_KEY")
-	ListenAddr   = os.Getenv("LISTEN_ADDR")
-	geminiClient *genai.Client
+	GeminiApiKey  = os.Getenv("GEMINI_API_KEY")
+	GeminiApiKeys = strings.Split(GeminiApiKey, ";")
+	ListenAddr    = os.Getenv("LISTEN_ADDR")
+	geminiClients []*genai.Client
+	currentClient atomic.Int32
 )
 
 func embeddingsHandler(w http.ResponseWriter, r *http.Request) {
@@ -64,9 +68,11 @@ func embeddingsHandler(w http.ResponseWriter, r *http.Request) {
 			Msg("")
 		return
 	}
-	requestLogger.Info().Str("model", openAIReq.Model).Msg("Processing request")
 
-	embeddingModel := geminiClient.EmbeddingModel(openAIReq.Model)
+	useIndex := currentClient.Add(1) % int32(len(geminiClients))
+	requestLogger.Info().Str("model", openAIReq.Model).Int32("client", useIndex).Msg("Processing request")
+
+	embeddingModel := geminiClients[useIndex].EmbeddingModel(openAIReq.Model)
 
 	geminiBatchReq, err := openai.ConvertOpenAIRequestToGemini(&openAIReq, embeddingModel)
 	if err != nil {
@@ -121,7 +127,7 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 
 	var models []*openai.ModelResponseData
 
-	iter := geminiClient.ListModels(r.Context())
+	iter := geminiClients[0].ListModels(r.Context())
 	for {
 		m, err := iter.Next()
 		if err == iterator.Done {
@@ -164,23 +170,20 @@ func main() {
 	if GeminiApiKey == "" {
 		log.Fatal().Msg("GEMINI_API_KEY is required")
 	}
+	currentClient.Store(0)
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMs
-	var err error
-	geminiClient, err = genai.NewClient(context.Background(), option.WithAPIKey(GeminiApiKey))
-	if err != nil {
-		log.
-			Fatal().
-			Err(errors.Wrap(err, "failed to create Gemini client")).
-			Int("status-code", http.StatusInternalServerError).
-			Msg("")
-		return
-	}
-	defer func(geminiClient *genai.Client) {
-		err := geminiClient.Close()
+	for _, key := range GeminiApiKeys {
+		client, err := genai.NewClient(context.Background(), option.WithAPIKey(key))
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to close Gemini client")
+			log.
+				Fatal().
+				Err(errors.Wrap(err, "failed to create Gemini client")).
+				Int("status-code", http.StatusInternalServerError).
+				Msg("")
+			return
 		}
-	}(geminiClient)
+		geminiClients = append(geminiClients, client)
+	}
 	http.HandleFunc(openAIEmbeddingsEndpoint, embeddingsHandler)
 	http.HandleFunc(openAIModelsEndpoints, modelsHandler)
 	log.Info().Msgf("Listening on %s", ListenAddr)
