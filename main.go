@@ -16,6 +16,9 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const (
@@ -27,11 +30,43 @@ var (
 	GeminiApiKey  = os.Getenv("GEMINI_API_KEY")
 	GeminiApiKeys = strings.Split(GeminiApiKey, ";")
 	ListenAddr    = os.Getenv("LISTEN_ADDR")
+	MetricsAddr   = os.Getenv("METRICS_ADDR")
 	geminiClients []*genai.Client
 	currentClient atomic.Int32
+
+	requestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "requests_total",
+			Help: "Total number of requests",
+		},
+		[]string{"path", "method", "status"},
+	)
+	embeddingBatchSize = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "embedding_batch_size",
+			Help:    "Size of embedding batches",
+			Buckets: prometheus.LinearBuckets(1, 1, 10),
+		},
+		[]string{"model"},
+	)
+	requestLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "request_latency_seconds",
+			Help:    "Request latency in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"path", "method"},
+	)
 )
 
+func init() {
+	prometheus.MustRegister(requestsTotal)
+	prometheus.MustRegister(embeddingBatchSize)
+	prometheus.MustRegister(requestLatency)
+}
+
 func embeddingsHandler(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	requestLogger := log.With().
 		Str("path", r.URL.Path).
 		Str("user-agent", r.Header.Get("User-Agent")).
@@ -43,6 +78,8 @@ func embeddingsHandler(w http.ResponseWriter, r *http.Request) {
 			Error().
 			Int("status-code", http.StatusMethodNotAllowed).
 			Msg("")
+		requestsTotal.WithLabelValues(r.URL.Path, r.Method, http.StatusText(http.StatusMethodNotAllowed)).Inc()
+		requestLatency.WithLabelValues(r.URL.Path, r.Method).Observe(time.Since(start).Seconds())
 		return
 	}
 
@@ -54,6 +91,8 @@ func embeddingsHandler(w http.ResponseWriter, r *http.Request) {
 			Err(errors.Wrap(err, "failed to read request body")).
 			Int("status-code", http.StatusBadRequest).
 			Msg("")
+		requestsTotal.WithLabelValues(r.URL.Path, r.Method, http.StatusText(http.StatusBadRequest)).Inc()
+		requestLatency.WithLabelValues(r.URL.Path, r.Method).Observe(time.Since(start).Seconds())
 		return
 	}
 
@@ -66,6 +105,8 @@ func embeddingsHandler(w http.ResponseWriter, r *http.Request) {
 			Err(errors.Wrap(err, "failed to unmarshal request body")).
 			Int("status-code", http.StatusBadRequest).
 			Msg("")
+		requestsTotal.WithLabelValues(r.URL.Path, r.Method, http.StatusText(http.StatusBadRequest)).Inc()
+		requestLatency.WithLabelValues(r.URL.Path, r.Method).Observe(time.Since(start).Seconds())
 		return
 	}
 
@@ -82,6 +123,8 @@ func embeddingsHandler(w http.ResponseWriter, r *http.Request) {
 			Err(errors.Wrap(err, "failed to convert OpenAI request to Gemini request")).
 			Int("status-code", http.StatusBadRequest).
 			Msg("")
+		requestsTotal.WithLabelValues(r.URL.Path, r.Method, http.StatusText(http.StatusBadRequest)).Inc()
+		requestLatency.WithLabelValues(r.URL.Path, r.Method).Observe(time.Since(start).Seconds())
 		return
 	}
 
@@ -93,10 +136,14 @@ func embeddingsHandler(w http.ResponseWriter, r *http.Request) {
 			Err(errors.Wrap(err, "failed to batch embed contents")).
 			Int("status-code", http.StatusInternalServerError).
 			Msg("")
+		requestsTotal.WithLabelValues(r.URL.Path, r.Method, http.StatusText(http.StatusInternalServerError)).Inc()
+		requestLatency.WithLabelValues(r.URL.Path, r.Method).Observe(time.Since(start).Seconds())
 		return
 	}
 
 	openAIResp := openai.ConvertGeminiResponseToOpenAI(geminiBatchResp, openAIReq.Model)
+
+	embeddingBatchSize.WithLabelValues(openAIReq.Model).Observe(float64(len(openAIReq.Input.([]interface{}))))
 
 	w.Header().Set("Content-Type", "application/json")
 	err = json.NewEncoder(w).Encode(openAIResp)
@@ -106,11 +153,17 @@ func embeddingsHandler(w http.ResponseWriter, r *http.Request) {
 			Err(errors.Wrap(err, "failed to encode response")).
 			Int("status-code", http.StatusInternalServerError).
 			Msg("")
+		requestsTotal.WithLabelValues(r.URL.Path, r.Method, http.StatusText(http.StatusInternalServerError)).Inc()
+		requestLatency.WithLabelValues(r.URL.Path, r.Method).Observe(time.Since(start).Seconds())
 		return
 	}
+
+	requestsTotal.WithLabelValues(r.URL.Path, r.Method, http.StatusText(http.StatusOK)).Inc()
+	requestLatency.WithLabelValues(r.URL.Path, r.Method).Observe(time.Since(start).Seconds())
 }
 
 func modelsHandler(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	requestLogger := log.With().
 		Str("path", r.URL.Path).
 		Str("user-agent", r.Header.Get("User-Agent")).
@@ -122,6 +175,8 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 			Error().
 			Int("status-code", http.StatusMethodNotAllowed).
 			Msg("")
+		requestsTotal.WithLabelValues(r.URL.Path, r.Method, http.StatusText(http.StatusMethodNotAllowed)).Inc()
+		requestLatency.WithLabelValues(r.URL.Path, r.Method).Observe(time.Since(start).Seconds())
 		return
 	}
 
@@ -136,6 +191,8 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			requestLogger.Error().Err(err).Msg("Failed to list models")
+			requestsTotal.WithLabelValues(r.URL.Path, r.Method, http.StatusText(http.StatusInternalServerError)).Inc()
+			requestLatency.WithLabelValues(r.URL.Path, r.Method).Observe(time.Since(start).Seconds())
 			return
 		}
 		if !slices.Contains(m.SupportedGenerationMethods, "embedContent") {
@@ -159,8 +216,13 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 			Err(errors.Wrap(err, "failed to encode response")).
 			Int("status-code", http.StatusInternalServerError).
 			Msg("")
+		requestsTotal.WithLabelValues(r.URL.Path, r.Method, http.StatusText(http.StatusInternalServerError)).Inc()
+		requestLatency.WithLabelValues(r.URL.Path, r.Method).Observe(time.Since(start).Seconds())
 		return
 	}
+
+	requestsTotal.WithLabelValues(r.URL.Path, r.Method, http.StatusText(http.StatusOK)).Inc()
+	requestLatency.WithLabelValues(r.URL.Path, r.Method).Observe(time.Since(start).Seconds())
 }
 
 func main() {
@@ -186,6 +248,16 @@ func main() {
 	}
 	http.HandleFunc(openAIEmbeddingsEndpoint, embeddingsHandler)
 	http.HandleFunc(openAIModelsEndpoints, modelsHandler)
+
+	if MetricsAddr != "" {
+		go func() {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", promhttp.Handler())
+			log.Info().Msgf("Exposing metrics on %s/metrics", MetricsAddr)
+			log.Fatal().Err(http.ListenAndServe(MetricsAddr, mux)).Msg("Failed to listen and serve metrics")
+		}()
+	}
+
 	log.Info().Msgf("Listening on %s", ListenAddr)
 	log.Fatal().Err(http.ListenAndServe(ListenAddr, nil)).Msg("Failed to listen and serve")
 }
