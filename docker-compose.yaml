@@ -1,0 +1,8 @@
+services:
+  gemini-to-openai-proxy:
+    image: ghcr.io/cheahjs/gemini-to-openai-proxy:latest
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LISTEN_ADDR=${LISTEN_ADDR}
+    ports:
+      - "8080:8080"
