@@ -1,4 +1,8 @@
 # gemini-to-openai-proxy
+
+> [!IMPORTANT]
+> ## This has now been superceded by Gemini's built in OpenAI compatibility: https://ai.google.dev/gemini-api/docs/openai#embeddings
+
 Call Gemini (https://ai.google.dev) embedding models with OpenAI-compatible endpoints
 
 ## Deployment
